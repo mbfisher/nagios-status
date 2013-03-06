@@ -1,15 +1,21 @@
 <?php
 
 $config = array(
-  'authenticate' => true,
-  'user' => 'geek',
-  'password' => 'auto007magic',
+  'authenticate' => false,
+  'user' => '',
+  'password' => '',
   'status-file' => '/usr/local/nagios/var/status.dat',
   'status' => array(
     0 => 'OK',
     1 => 'WARNING',
     2 => 'CRITICAL',
     3 => 'UNKNOWN'
+  ),
+  'service-colour' => array(
+    'ok' => 'darkgreen',
+    'warning' => 'yellow',
+    'critical' => 'red',
+    'unknown' => 'orange'
   ),
   'exclude-hosts' => array( 'localhost' ),
   'service-size' => array(
@@ -20,11 +26,14 @@ $config = array(
   ),
   'service-position' => array(
     'left-min' => 100,
-    'left-max' => 1100,
+    'left-max' => 1600,
     'top-min' => 150,
-    'top-max' => 500
+    'top-max' => 700
   ),
-  'animation-speed' => 3
+  'animation' => array(
+     'enable' => false,
+     'speed' => 5
+  )
 );
 
 class Host {
@@ -103,87 +112,95 @@ class Service {
 }
 
 class NagiosStatus {
-  static public function parse($f, &$summary) {
-    global $config;
-    if ( preg_match_all('/servicestatus {([^}]+)}/s', $f, $matches) ) {
-      foreach ( $matches[1] as $match ) {
+  public $config;
+
+  public function __construct($config) {
+    $this->config = $config;
+  }
+  public function parse($f) {
+    $summary = $hosts = array();
+    if ( preg_match_all('/(servicestatus|hoststatus) {([^}]+)}/s', $f, $matches) ) {
+      foreach ( $matches[2] as $i => $match ) {
         $service = new Service();
         $hostname = 'unknown';
         foreach ( explode("\n", $match) as $pair ) {
           if ( !empty($pair) && strpos($pair, '=') > 0 ) {
             list($k, $v) = array_map( 'trim', explode('=', $pair) );
             $k == 'host_name' && $hostname = $v;
+            if ( $k == 'current_state' && $matches[1][$i] == 'hoststatus' && $v > 0 ) $v = 2;
             $service->$k = $v;
           }
         }
-        if ( !in_array($hostname, $config['exclude-hosts']) ) {
-          $services[$hostname][] = $service;
+        if ( !in_array($hostname, $this->config['exclude-hosts']) ) {
+          $hosts[$hostname][] = $service;
           self::add_to_summary($summary, $service);
         }
       }
     }
-    return isset($services) ? $services : array();
+    return array( $hosts, $summary );
   }
   
-  static public function add_to_summary(&$summary, $service) {
-    global $config;
+  public function add_to_summary(&$summary, $service) {
     !isset($summary[$service->current_state]) && $summary[$service->current_state] = 0;
     $summary[$service->current_state]++;
     $summary['state'] = !isset($summary['state']) || $service->current_state > $summary['state'] ? $service->current_state : $summary['state'];
   }
-}
 
+  public function background_color($state) {
+    return $this->config['status-color'][$state];
+  }
 
-function background_color($state) {
-  switch($state) { 
-    case 0: return "white"; break;
-    case 1: return "yellow"; break; 
-    case 2: return "red"; break; 
+  public function left() {
+    return rand($this->config['service-position']['left-min'], $this->config['service-position']['left-max']);
+  }
+
+  public function top() {
+    return rand($this->config['service-position']['top-min'], $this->config['service-position']['top-max']);
+  }
+
+  public function auth() {
+    if ( $this->config['authenticate'] ) {
+      if ( 
+        ( !isset($_SERVER['PHP_AUTH_USER']) || $_SERVER['PHP_AUTH_USER'] != $this->config['user'] )
+        ||
+        ( !isset($_SERVER['PHP_AUTH_PW']) || $_SERVER['PHP_AUTH_PW'] != $this->config['password'] )
+      ) {
+        return false;
+      }
+    }
+
+    return true;
   }
 }
 
-function left() {
-  global $config;
-  return rand($config['service-position']['left-min'], $config['service-position']['left-max']);
-}
+$ns = new NagiosStatus($config);
 
-function top() {
-  global $config;
-  return rand($config['service-position']['top-min'], $config['service-position']['top-max']);
+if ( !$ns->auth() ) {
+  header('WWW-Authenticate: Basic realm="nagios-status"');
+  header('HTTP/1.0 401 Unauthorized');
+  echo "Unauthorized!";
+  exit;
 }
 
 if ( !$f = file_get_contents($config['status-file']) ) {
   die("Could not read status file [{$config['status-file']}]");
 }
 
+list($hosts, $summary)= $ns->parse($f);
 
-if ( 
-  ( !isset($_SERVER['PHP_AUTH_USER']) || $_SERVER['PHP_AUTH_USER'] != $config['user'] )
-  ||
-  ( !isset($_SERVER['PHP_AUTH_PW']) || $_SERVER['PHP_AUTH_PW'] != $config['password'] )
-) {
-  header('WWW-Authenticate: Basic realm="nagios-status"');
-  header('HTTP/1.0 401 Unauthorized');
-  echo "Unauthorized!";
-  exit;
-}
-else {
-  $summary = array();
-  $hosts = NagiosStatus::parse($f, $summary);
 ?>
 
 <html>
   <head>
     <style type="text/css">
       html { z-index: -1; }
-      /*body { background-color: <?= background_color($summary['state']) ?> }*/
       #hosts { margin: 120px auto 0 auto; }
       .host { border-right: 1px solid white; float: left; }
       .service { border: 1px solid white; cursor: pointer; position: absolute; z-index: 0; }
-      .service.ok { background-color: green; height: <?= $config['service-size']['ok'] ?>px; width: <?= $config['service-size']['ok'] ?>px; }
-      .service.unknown { background-color: orange; <?= $config['service-size']['unknown'] ?>px; width: <?= $config['service-size']['unknown'] ?>px; z-index: 5; }
-      .service.warning { background-color: yellow; height: <?= $config['service-size']['warning'] ?>px; width: <?= $config['service-size']['warning'] ?>px; z-index: 10; }
-      .service.critical { background-color: red; height: <?= $config['service-size']['critical'] ?>px; width: <?= $config['service-size']['critical'] ?>px; z-index: 15; }
+      .service.ok { background-color: <?= $config['service-colour']['ok'] ?>; height: <?= $config['service-size']['ok'] ?>px; width: <?= $config['service-size']['ok'] ?>px; }
+      .service.unknown { background-color: <?= $config['service-colour']['unknown'] ?>; <?= $config['service-size']['unknown'] ?>px; width: <?= $config['service-size']['unknown'] ?>px; z-index: 5; }
+      .service.warning { background-color: <?= $config['service-colour']['warning'] ?>; height: <?= $config['service-size']['warning'] ?>px; width: <?= $config['service-size']['warning'] ?>px; z-index: 10; }
+      .service.critical { background-color: <?= $config['service-colour']['critical'] ?>; height: <?= $config['service-size']['critical'] ?>px; width: <?= $config['service-size']['critical'] ?>px; z-index: 15; }
       .service:hover { border: 2px solid black; }
       .service.selected { border: 2px solid black; }
       .service-details { display: none; }
@@ -212,32 +229,26 @@ else {
           $('.service').removeClass('selected');
         });
 
-        var left_min = <?= $config['service-position']['left-min']; ?>;
-        var left_max = <?= $config['service-position']['left-max']; ?>;
-        var top_min = <?= $config['service-position']['top-min']; ?>;
-        var top_max = <?= $config['service-position']['top-max']; ?>;
+        if ( <?= (int) $config['animation']['enable'] ?> ) {
+          var left_min = <?= $config['service-position']['left-min']; ?>;
+          var left_max = <?= $config['service-position']['left-max']; ?>;
+          var top_min = <?= $config['service-position']['top-min']; ?>;
+          var top_max = <?= $config['service-position']['top-max']; ?>;
 
-        $('.service.ok').each( function() {
-          /*var c = document.getElementById('canvas-'+$(this).attr('id').split('-')[1]);
-          var ctx=c.getContext("2d");
-          ctx.beginPath();
-          ctx.arc(21, 21, 20, 0, 2*Math.PI);
-          ctx.stroke();
-          ctx.fillStyle = '#CCC';
-          ctx.fill();*/
-
-          var la = Math.floor(Math.random()*(left_max-left_min)+left_min);
-          var ta = Math.floor(Math.random()*(top_max-top_min)+top_min);
-          var ln = Number($(this).css('left').replace('px', ''));
-          var tn = Number($(this).css('top').replace('px', '')); 
-          var distance = Math.floor(Math.sqrt( Math.pow(Math.abs(la-ln), 2) + Math.pow(Math.abs(ta-tn), 2) ));
-          var speed = <?= $config['animation-speed']; ?>;
-          var time = Math.floor( distance / (speed/1000) );
-          console.log('['+[la+','+ln, ta+','+tn, distance, time].join('][')+']');
-          $(this).animate({ left: la, top: ta }, time, 'linear');
-        });
+          $('.service.ok').each( function(i) {
+            var la = Math.floor(Math.random()*(left_max-left_min)+left_min);
+            var ta = Math.floor(Math.random()*(top_max-top_min)+top_min);
+            var ln = Number($(this).css('left').replace('px', ''));
+            var tn = Number($(this).css('top').replace('px', '')); 
+            var distance = Math.floor(Math.sqrt( Math.pow(Math.abs(la-ln), 2) + Math.pow(Math.abs(ta-tn), 2) ));
+            var speed = <?= $config['animation']['speed']; ?>;
+            var time = Math.floor( distance / (speed/1000) );
+            console.log('['+[la+','+ln, ta+','+tn, distance, time].join('][')+']');
+            $(this).animate({ left: la, top: ta }, time, 'linear');
+          });
+        }
       });
-     </script>
+    </script>
   </head>
   <body>
     <div id="service-details"></div>
@@ -246,7 +257,7 @@ else {
       <?php foreach ( $hosts as $hostname => $services ) { ?>
         <!--<div class="host">-->
           <?php foreach ( $services as $s => $service ) { ?>
-            <div id="service-<?= $i ?>" class="service <?= strtolower($config['status'][$service->current_state]) ?>" style="left: <?php echo left() ?>px; top: <? echo top() ?>px">
+            <div id="service-<?= $i ?>" class="service <?= strtolower($config['status'][$service->current_state]) ?>" style="left: <?php echo $ns->left() ?>px; top: <? echo $ns->top() ?>px">
               <div class="service-details">
                 <div class="pair"><span class="key">Host</span><span class="value"><?= $service->host_name ?></span></div>
                 <div class="pair"><span class="key">Description</span><span class="value"><?= $service->service_description ?></span></div>
@@ -266,5 +277,3 @@ else {
     </div>
   </body>
 </html>
- 
-<?php } ?>
